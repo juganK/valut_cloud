@@ -697,7 +697,6 @@ el.btnModalClose.addEventListener('click', () => {
 });
 
 // ==========================================
-// 11. Unlock Vault & Live Sync Engine
 // ==========================================
 // 11. Unlock Vault & Live Sync Engine
 // ==========================================
@@ -716,20 +715,36 @@ function parseCodeOrUrl(input) {
     } catch (e) {}
   }
 
-  // If it's a URL or contains #code= or ?code=
+  // 1. If it's a URL or contains explicit #code= or ?code= or #vault=
   const codeParamMatch = input.match(/[#&?]code=([A-Za-z0-9_-]+)/i) || input.match(/[#&?]vault=([A-Za-z0-9_-]+)/i);
   if (codeParamMatch && codeParamMatch[1]) {
     return codeParamMatch[1].toUpperCase();
   }
 
-  // If it's a URL path ending with code e.g. /vaults/VAULT-1234
+  // 2. If it's a URL path ending with code e.g. /vaults/VAULT-1234
   const urlPathMatch = input.match(/\/vaults\/([A-Za-z0-9_-]+)/i);
   if (urlPathMatch && urlPathMatch[1]) {
     return urlPathMatch[1].toUpperCase();
   }
 
-  // Raw code entered by user
-  return input.replace(/^[#/]+/, '').trim().toUpperCase();
+  // 3. If it looks like a URL (contains protocol, domain, or root slashes)
+  if (input.includes('://') || input.includes('.vercel.app') || input.includes('localhost:') || input.startsWith('/')) {
+    // Check if hash fragment itself is an exact vault code (e.g. #VAULT-1234 or #SHIELD-abcd)
+    const hashOnly = input.match(/#([A-Za-z0-9_-]{3,32})$/);
+    if (hashOnly && hashOnly[1]) {
+      return hashOnly[1].toUpperCase();
+    }
+    // Base URL or page route without a vault code: return null so search input remains empty
+    return null;
+  }
+
+  // 4. Raw code entered by user (e.g. "VAULT-1234", "shield-abc", "mysecret")
+  const clean = input.replace(/^[#/]+/, '').trim().toUpperCase();
+  if (clean.length >= 2 && clean.length <= 32 && /^[A-Z0-9_-]+$/.test(clean)) {
+    return clean;
+  }
+
+  return null;
 }
 
 el.headerQuickUnlockForm.addEventListener('submit', (e) => {
@@ -746,6 +761,9 @@ el.headerQuickUnlockForm.addEventListener('submit', (e) => {
   if (cleanCode) {
     el.headerCodeInput.value = cleanCode;
     unlockCode(cleanCode);
+  } else {
+    sound.playError();
+    toast('Invalid vault code or link', 'error');
   }
 });
 
@@ -1277,6 +1295,10 @@ el.btnClearHistory.addEventListener('click', () => {
 // 13. Deep Linking & Stats
 // ==========================================
 function checkDeepLink() {
+  const hash = window.location.hash || '';
+  const search = window.location.search || '';
+  if (!hash && !search) return;
+
   const fullUrl = window.location.href;
   const code = parseCodeOrUrl(fullUrl);
 
