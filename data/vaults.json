@@ -14,5 +14,21 @@
     "burnAfterRead": false,
     "allowEdits": false,
     "viewsCount": 1
+  },
+  "VERCEL-1": {
+    "code": "VERCEL-1",
+    "title": "Test",
+    "content": "Testing Vercel API",
+    "isEncrypted": false,
+    "iv": null,
+    "salt": null,
+    "hasPin": false,
+    "pinHash": null,
+    "pinSalt": null,
+    "createdAt": 1792007420194,
+    "expiresAt": null,
+    "burnAfterRead": false,
+    "allowEdits": false,
+    "viewsCount": 0
   }
 }
