@@ -1,7 +1,7 @@
 /**
  * Vault — Minimalist Split-Screen Client Controller
- * Robust client with safe API handling, Web Crypto AES-256,
- * hybrid self-contained share links, and instant unlocks.
+ * Complete real-time collaborative sync, safe API handling,
+ * Web Crypto AES-256, and live cross-device sync.
  */
 
 // ==========================================
@@ -92,6 +92,9 @@ class SoundFX {
 }
 
 const sound = new SoundFX();
+
+// Cross-tab broadcast channel for 0ms instant sync across tabs on same device
+const syncBus = (typeof window !== 'undefined' && window.BroadcastChannel) ? new BroadcastChannel('vault_collab_bus') : null;
 
 // ==========================================
 // 2. Safe API Fetch Helper
@@ -281,7 +284,6 @@ const VaultHistory = {
   }
 };
 
-// Local storage cache for zero-data-loss serverless fallback
 function saveLocalVaultPayload(code, payload) {
   try {
     localStorage.setItem(`vault_payload_${code}`, JSON.stringify(payload));
@@ -347,6 +349,7 @@ const el = {
   viewerCodeText: document.getElementById('viewer-code-text'),
   viewerTitleText: document.getElementById('viewer-title-text'),
   viewerBurnBadge: document.getElementById('viewer-burn-badge'),
+  viewerCollabBadge: document.getElementById('viewer-collab-badge'),
   viewerExpiryText: document.getElementById('viewer-expiry-text'),
   viewerViewsText: document.getElementById('viewer-views-text'),
   viewerBurnAlert: document.getElementById('viewer-burn-alert'),
@@ -393,6 +396,7 @@ const el = {
 
 let currentVault = null;
 let countdownTimer = null;
+let liveSyncInterval = null;
 let isPreviewing = false;
 let pendingPinCode = null;
 
@@ -417,6 +421,7 @@ function toast(message, type = 'info') {
 // ==========================================
 function showWorkspace() {
   sound.playClick();
+  stopLiveSync();
   el.workspaceSplit.classList.remove('hidden');
   el.viewerContainer.classList.add('hidden');
   if (countdownTimer) clearInterval(countdownTimer);
@@ -577,7 +582,6 @@ async function submitVault() {
       isEncrypted = true;
     }
 
-    // Call server API
     const data = await apiCall('/api/vaults', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -598,7 +602,6 @@ async function submitVault() {
     sound.playSuccess();
     toast('Vault created and saved in cloud!', 'success');
 
-    // Build self-contained hybrid payload (ensures zero data loss across serverless cold starts)
     const selfContained = {
       c: data.code,
       t: data.title,
@@ -608,6 +611,7 @@ async function submitVault() {
       s: salt || '',
       pin: hasPin ? 1 : 0,
       exp: data.expiresAt || 0,
+      up: Date.now(),
       burn: burnAfterRead ? 1 : 0,
       ed: allowEdits ? 1 : 0
     };
@@ -615,7 +619,7 @@ async function submitVault() {
     saveLocalVaultPayload(data.code, selfContained);
     VaultHistory.add({ code: data.code, title: data.title });
 
-    // Pack into URL fragment so links NEVER vanish
+    // Pack into URL fragment so direct links and QR codes work across devices
     const b64Data = window.btoa(encodeURIComponent(JSON.stringify(selfContained)));
     const shareUrl = `${window.location.origin}/#code=${data.code}&v=${b64Data}`;
 
@@ -626,7 +630,7 @@ async function submitVault() {
       const qrData = await apiCall(`/api/vaults/${encodeURIComponent(data.code)}/qr`);
       if (qrData && qrData.qr) el.modalQrImg.src = qrData.qr;
     } catch (e) {
-      console.warn('QR fallback');
+      console.warn('QR code fallback');
     }
 
     el.successDialog.showModal();
@@ -693,24 +697,62 @@ el.btnModalClose.addEventListener('click', () => {
 });
 
 // ==========================================
-// 11. Unlock Vault
+// 11. Unlock Vault & Live Sync Engine
 // ==========================================
+// 11. Unlock Vault & Live Sync Engine
+// ==========================================
+function parseCodeOrUrl(input) {
+  if (!input || typeof input !== 'string') return null;
+  input = input.trim();
+
+  // If input contains a self-contained embedded payload `v=...`
+  const vMatch = input.match(/[#&?]v=([A-Za-z0-9+/=]+)/);
+  if (vMatch && vMatch[1]) {
+    try {
+      const decoded = JSON.parse(decodeURIComponent(window.atob(vMatch[1])));
+      if (decoded && decoded.c) {
+        saveLocalVaultPayload(decoded.c, decoded);
+      }
+    } catch (e) {}
+  }
+
+  // If it's a URL or contains #code= or ?code=
+  const codeParamMatch = input.match(/[#&?]code=([A-Za-z0-9_-]+)/i) || input.match(/[#&?]vault=([A-Za-z0-9_-]+)/i);
+  if (codeParamMatch && codeParamMatch[1]) {
+    return codeParamMatch[1].toUpperCase();
+  }
+
+  // If it's a URL path ending with code e.g. /vaults/VAULT-1234
+  const urlPathMatch = input.match(/\/vaults\/([A-Za-z0-9_-]+)/i);
+  if (urlPathMatch && urlPathMatch[1]) {
+    return urlPathMatch[1].toUpperCase();
+  }
+
+  // Raw code entered by user
+  return input.replace(/^[#/]+/, '').trim().toUpperCase();
+}
+
 el.headerQuickUnlockForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  const code = el.headerCodeInput.value.trim().toUpperCase();
-  if (!code) {
+  const rawInput = el.headerCodeInput.value.trim();
+  if (!rawInput) {
     sound.playError();
-    toast('Please enter a code to unlock', 'error');
+    toast('Please enter a code or link to unlock', 'error');
     el.headerCodeInput.focus();
     return;
   }
-  unlockCode(code);
+
+  const cleanCode = parseCodeOrUrl(rawInput);
+  if (cleanCode) {
+    el.headerCodeInput.value = cleanCode;
+    unlockCode(cleanCode);
+  }
 });
 
 function extractUrlEmbeddedPayload(targetCode) {
   try {
     const hash = window.location.hash || '';
-    const match = hash.match(/&v=([A-Za-z0-9+/=]+)/);
+    const match = hash.match(/[#&]v=([A-Za-z0-9+/=]+)/);
     if (match && match[1]) {
       const decoded = JSON.parse(decodeURIComponent(window.atob(match[1])));
       if (!targetCode || decoded.c === targetCode) {
@@ -721,6 +763,84 @@ function extractUrlEmbeddedPayload(targetCode) {
   return null;
 }
 
+// REAL-TIME COLLABORATIVE LIVE SYNC
+function startLiveSync(code) {
+  stopLiveSync();
+
+  // Poll server every 1.6s for live collaborative updates without reloading
+  liveSyncInterval = setInterval(async () => {
+    if (!currentVault || currentVault.code !== code || !currentVault.allowEdits) {
+      stopLiveSync();
+      return;
+    }
+
+    try {
+      const pinParam = currentVault.pin ? `&pin=${encodeURIComponent(currentVault.pin)}` : '';
+      const syncData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/sync?since=${currentVault.updatedAt || 0}${pinParam}`);
+
+      if (syncData && syncData.modified && syncData.updatedAt > (currentVault.updatedAt || 0)) {
+        await applyRemoteSync(code, syncData.content, syncData.iv, syncData.salt, syncData.updatedAt);
+      }
+    } catch (e) {
+      // Silently retry on next interval
+    }
+  }, 1600);
+}
+
+function stopLiveSync() {
+  if (liveSyncInterval) {
+    clearInterval(liveSyncInterval);
+    liveSyncInterval = null;
+  }
+}
+
+// Apply remote update to UI seamlessly without reloading
+async function applyRemoteSync(code, ciphertext, iv, salt, updatedAt) {
+  if (!currentVault || currentVault.code !== code) return;
+
+  let newDecrypted = ciphertext;
+  if (currentVault.isEncrypted) {
+    try {
+      const secret = code + (currentVault.pin ? `:${currentVault.pin}` : '');
+      newDecrypted = await CryptoVault.decrypt(ciphertext, secret, iv, salt);
+    } catch (e) {
+      return;
+    }
+  }
+
+  currentVault.content = ciphertext;
+  currentVault.decryptedText = newDecrypted;
+  currentVault.iv = iv;
+  currentVault.salt = salt;
+  currentVault.updatedAt = updatedAt;
+
+  // Update viewer
+  el.unlockedTextRaw.textContent = newDecrypted;
+  el.unlockedTextRendered.innerHTML = renderMarkdown(newDecrypted);
+
+  // Update edit textarea if open
+  const isEditing = !el.unlockedEditContainer.classList.contains('hidden');
+  if (isEditing) {
+    if (el.editContentTextarea.value !== newDecrypted) {
+      toast('Collaborator updated this note. Live text synced.', 'info');
+      el.editContentTextarea.value = newDecrypted;
+    }
+  } else {
+    toast('Live update received from collaborator!', 'info');
+  }
+}
+
+// Listen to cross-tab updates on the same machine
+if (syncBus) {
+  syncBus.onmessage = async (evt) => {
+    if (evt.data && evt.data.type === 'vault_updated' && currentVault && evt.data.code === currentVault.code) {
+      if (evt.data.updatedAt > (currentVault.updatedAt || 0)) {
+        await applyRemoteSync(evt.data.code, evt.data.content, evt.data.iv, evt.data.salt, evt.data.updatedAt);
+      }
+    }
+  };
+}
+
 async function unlockCode(code, providedPin = null) {
   if (!code || typeof code !== 'string' || !code.trim()) {
     toast('Please enter a valid vault code.', 'error');
@@ -729,85 +849,68 @@ async function unlockCode(code, providedPin = null) {
   code = code.trim().toUpperCase();
 
   try {
-    let metaData = null;
-    let fallbackRecord = null;
+    let vaultPayload = null;
+    let usedFallback = false;
 
-    // 1. Try server first
+    // 1. ALWAYS TRY LIVE SERVER FIRST
     try {
-      metaData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/meta`);
-    } catch (serverErr) {
-      // 2. Fallback to embedded URL payload or local cache
-      const urlData = extractUrlEmbeddedPayload(code);
-      const cached = getLocalVaultPayload(code);
-      fallbackRecord = urlData || cached;
-
-      if (!fallbackRecord) {
-        throw serverErr;
+      const meta = await apiCall(`/api/vaults/${encodeURIComponent(code)}/meta`);
+      if (meta.hasPin && !providedPin) {
+        pendingPinCode = code;
+        el.pinPromptDesc.textContent = `Vault ${code} is PIN protected. Enter PIN below:`;
+        el.modalPinInput.value = '';
+        el.pinPromptDialog.showModal();
+        el.modalPinInput.focus();
+        return;
       }
 
-      metaData = {
-        code: fallbackRecord.c,
-        title: fallbackRecord.t,
-        hasPin: Boolean(fallbackRecord.pin),
-        isEncrypted: Boolean(fallbackRecord.enc),
-        salt: fallbackRecord.s,
-        iv: fallbackRecord.iv,
-        expiresAt: fallbackRecord.exp,
-        burnAfterRead: Boolean(fallbackRecord.burn),
-        allowEdits: Boolean(fallbackRecord.ed)
-      };
-    }
+      const unlockData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: providedPin || undefined })
+      });
+      vaultPayload = unlockData.vault;
+    } catch (serverErr) {
+      if (serverErr.data && serverErr.data.requiresPin) {
+        pendingPinCode = code;
+        el.pinPromptDialog.showModal();
+        el.modalPinInput.focus();
+        return;
+      }
 
-    // Check PIN requirement
-    if (metaData.hasPin && !providedPin) {
-      pendingPinCode = code;
-      el.pinPromptDesc.textContent = `Vault ${code} is PIN protected. Enter PIN below:`;
-      el.modalPinInput.value = '';
-      el.pinPromptDialog.showModal();
-      el.modalPinInput.focus();
-      return;
-    }
-
-    let vaultPayload = null;
-
-    if (!fallbackRecord) {
-      try {
-        const unlockData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/unlock`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pin: providedPin || undefined })
-        });
-        vaultPayload = unlockData.vault;
-      } catch (unlockErr) {
-        if (unlockErr.data && unlockErr.data.requiresPin) {
+      // 2. Only if server returns 404 (e.g. cold serverless instance), use URL embedded payload or local cache
+      const embedded = extractUrlEmbeddedPayload(code) || getLocalVaultPayload(code);
+      if (embedded) {
+        if (embedded.pin && !providedPin) {
           pendingPinCode = code;
+          el.pinPromptDesc.textContent = `Vault ${code} is PIN protected. Enter PIN below:`;
+          el.modalPinInput.value = '';
           el.pinPromptDialog.showModal();
           el.modalPinInput.focus();
           return;
         }
-        // Fallback to local if server returned error
-        fallbackRecord = getLocalVaultPayload(code) || extractUrlEmbeddedPayload(code);
-        if (!fallbackRecord) throw unlockErr;
+
+        vaultPayload = {
+          code: embedded.c,
+          title: embedded.t,
+          content: embedded.cnt,
+          isEncrypted: Boolean(embedded.enc),
+          iv: embedded.iv,
+          salt: embedded.s,
+          allowEdits: Boolean(embedded.ed),
+          viewsCount: 1,
+          expiresAt: embedded.exp,
+          updatedAt: embedded.up || Date.now(),
+          burned: Boolean(embedded.burn)
+        };
+        usedFallback = true;
+      } else {
+        throw serverErr;
       }
     }
 
-    if (fallbackRecord) {
-      vaultPayload = {
-        code: fallbackRecord.c,
-        title: fallbackRecord.t,
-        content: fallbackRecord.cnt,
-        isEncrypted: Boolean(fallbackRecord.enc),
-        iv: fallbackRecord.iv,
-        salt: fallbackRecord.s,
-        allowEdits: Boolean(fallbackRecord.ed),
-        viewsCount: 1,
-        expiresAt: fallbackRecord.exp,
-        burned: Boolean(fallbackRecord.burn)
-      };
-
-      if (fallbackRecord.burn) {
-        removeLocalVaultPayload(code);
-      }
+    if (!vaultPayload) {
+      throw new Error('Vault could not be found.');
     }
 
     let decryptedText = vaultPayload.content;
@@ -823,7 +926,7 @@ async function unlockCode(code, providedPin = null) {
     }
 
     sound.playUnlock();
-    toast('Vault unlocked!', 'success');
+    toast(usedFallback ? 'Vault restored from secure link!' : 'Vault unlocked!', 'success');
 
     currentVault = {
       ...vaultPayload,
@@ -835,6 +938,11 @@ async function unlockCode(code, providedPin = null) {
 
     renderViewer(currentVault);
     showViewer();
+
+    // Start Live Real-Time Sync if collaborative
+    if (currentVault.allowEdits && !currentVault.burned) {
+      startLiveSync(currentVault.code);
+    }
   } catch (err) {
     sound.playError();
     toast(err.message, 'error');
@@ -867,6 +975,10 @@ function renderViewer(vault) {
   } else {
     el.viewerBurnBadge.classList.add('hidden');
     el.viewerBurnAlert.classList.add('hidden');
+  }
+
+  if (el.viewerCollabBadge) {
+    el.viewerCollabBadge.classList.toggle('hidden', !vault.allowEdits || Boolean(vault.burned));
   }
 
   el.unlockedTextRaw.textContent = vault.decryptedText;
@@ -995,6 +1107,7 @@ el.btnCancelEdit.addEventListener('click', () => {
   el.btnEditUnlocked.textContent = 'Edit';
 });
 
+// Save Collaborative Changes
 el.btnSaveEdit.addEventListener('click', async () => {
   if (!currentVault) return;
   const newContent = el.editContentTextarea.value.trim();
@@ -1008,8 +1121,8 @@ el.btnSaveEdit.addEventListener('click', async () => {
 
   try {
     let payload = newContent;
-    let iv = null;
-    let salt = null;
+    let iv = currentVault.iv;
+    let salt = currentVault.salt;
 
     if (currentVault.isEncrypted) {
       const secret = currentVault.code + (currentVault.pin ? `:${currentVault.pin}` : '');
@@ -1019,7 +1132,7 @@ el.btnSaveEdit.addEventListener('click', async () => {
       salt = encrypted.salt;
     }
 
-    await apiCall(`/api/vaults/${encodeURIComponent(currentVault.code)}`, {
+    const putRes = await apiCall(`/api/vaults/${encodeURIComponent(currentVault.code)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1031,7 +1144,45 @@ el.btnSaveEdit.addEventListener('click', async () => {
       })
     });
 
+    const newUpdatedAt = (putRes && putRes.updatedAt) || Date.now();
+
+    currentVault.content = payload;
+    currentVault.iv = iv;
+    currentVault.salt = salt;
     currentVault.decryptedText = newContent;
+    currentVault.updatedAt = newUpdatedAt;
+
+    // Update local cache & self-contained URL
+    const updatedRecord = {
+      c: currentVault.code,
+      t: currentVault.title,
+      cnt: payload,
+      enc: currentVault.isEncrypted ? 1 : 0,
+      iv: iv || '',
+      s: salt || '',
+      pin: currentVault.hasPin ? 1 : 0,
+      exp: currentVault.expiresAt || 0,
+      up: newUpdatedAt,
+      burn: currentVault.burnAfterRead ? 1 : 0,
+      ed: currentVault.allowEdits ? 1 : 0
+    };
+    saveLocalVaultPayload(currentVault.code, updatedRecord);
+
+    const b64Data = window.btoa(encodeURIComponent(JSON.stringify(updatedRecord)));
+    window.location.hash = `code=${currentVault.code}&v=${b64Data}`;
+
+    // Broadcast live across tabs
+    if (syncBus) {
+      syncBus.postMessage({
+        type: 'vault_updated',
+        code: currentVault.code,
+        content: payload,
+        iv,
+        salt,
+        updatedAt: newUpdatedAt
+      });
+    }
+
     el.unlockedTextRaw.textContent = newContent;
     el.unlockedTextRendered.innerHTML = renderMarkdown(newContent);
 
@@ -1041,7 +1192,7 @@ el.btnSaveEdit.addEventListener('click', async () => {
     el.btnEditUnlocked.textContent = 'Edit';
 
     sound.playSuccess();
-    toast('Cloud changes saved', 'success');
+    toast('Cloud changes saved & synced live!', 'success');
   } catch (err) {
     sound.playError();
     toast(err.message, 'error');
@@ -1126,24 +1277,19 @@ el.btnClearHistory.addEventListener('click', () => {
 // 13. Deep Linking & Stats
 // ==========================================
 function checkDeepLink() {
-  const hash = window.location.hash;
-  const search = window.location.search;
-  let code = null;
+  const fullUrl = window.location.href;
+  const code = parseCodeOrUrl(fullUrl);
 
-  const match = hash.match(/#code=([A-Za-z0-9_-]+)/i) || hash.match(/#vault=([A-Za-z0-9_-]+)/i);
-  if (match) {
-    code = match[1];
-  } else {
-    const params = new URLSearchParams(search);
-    code = params.get('code') || params.get('vault');
-  }
-
-  if (code) {
-    code = code.trim().toUpperCase();
+  if (code && (!currentVault || currentVault.code !== code)) {
     el.headerCodeInput.value = code;
-    setTimeout(() => unlockCode(code), 300);
+    setTimeout(() => unlockCode(code), 200);
   }
 }
+
+// Zero-Reload Navigation: Automatically detect when a link is clicked or hash changes
+window.addEventListener('hashchange', () => {
+  checkDeepLink();
+});
 
 async function fetchStats() {
   try {

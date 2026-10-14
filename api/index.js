@@ -7,7 +7,7 @@ const QRCode = require('qrcode');
 
 const app = express();
 
-// Determine environment & writable data path (Vercel serverless requires /tmp)
+// Determine environment & writable data path (Vercel serverless uses /tmp)
 const isVercel = Boolean(process.env.VERCEL);
 const DATA_DIR = isVercel ? '/tmp' : path.join(__dirname, '..', 'data');
 const DB_FILE = path.join(DATA_DIR, 'vaults.json');
@@ -21,7 +21,9 @@ try {
   console.warn('Data dir notice:', e.message);
 }
 
-// In-memory cache + file-backed storage
+// -------------------------------------------------------------
+// Level 1: In-Memory & File Cache
+// -------------------------------------------------------------
 let vaults = {};
 
 function loadVaults() {
@@ -31,7 +33,7 @@ function loadVaults() {
       vaults = JSON.parse(raw);
     }
   } catch (err) {
-    // If empty or corrupted, keep current in-memory cache
+    // Keep in-memory cache on read error
   }
   return vaults;
 }
@@ -44,7 +46,9 @@ function saveVaults() {
   }
 }
 
-// Optional Vercel KV / Upstash Redis Support (For 100% persistent global serverless storage)
+// -------------------------------------------------------------
+// Level 2: Vercel KV / Upstash Redis (if configured)
+// -------------------------------------------------------------
 const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -93,34 +97,207 @@ async function kvDel(code) {
   }
 }
 
-// Unified Get Vault Helper (KV -> File -> Memory)
+// -------------------------------------------------------------
+// Level 3: Automatic Global Cloud Persistence (ExtendsClass JSON Store)
+// Solves multi-device sync & multi-instance Vercel Serverless persistence
+// -------------------------------------------------------------
+const MASTER_INDEX_BIN = 'cbfbdac';
+
+async function cloudBinCreate(payload) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch('https://extendsclass.com/api/json-storage/bin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.id) return data.id;
+    }
+  } catch (e) {
+    console.warn('Cloud bin create notice:', e.message);
+  }
+  return null;
+}
+
+async function cloudBinGet(binId) {
+  if (!binId) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`https://extendsclass.com/api/json-storage/bin/${binId}`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const json = await res.json();
+      if (json && !json.message && (json.content || json.code)) {
+        return json;
+      }
+    }
+  } catch (e) {
+    console.warn('Cloud bin get notice:', e.message);
+  }
+  return null;
+}
+
+async function cloudBinPut(binId, payload) {
+  if (!binId) return false;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`https://extendsclass.com/api/json-storage/bin/${binId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch (e) {
+    console.warn('Cloud bin put notice:', e.message);
+    return false;
+  }
+}
+
+async function cloudBinDelete(binId) {
+  if (!binId) return false;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    await fetch(`https://extendsclass.com/api/json-storage/bin/${binId}`, {
+      method: 'DELETE',
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function extractBinId(code) {
+  if (!code) return null;
+  code = code.trim().toLowerCase();
+  // Formats like VAULT-fdbcbbd or CIPHER-fdbcbbd
+  const match = code.match(/^[a-z]+-([a-z0-9]{6,10})$/i) || code.match(/^([a-z0-9]{6,10})$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+async function cloudIndexGet(customCode) {
+  try {
+    const master = await cloudBinGet(MASTER_INDEX_BIN);
+    if (master && master.index && master.index[customCode]) {
+      return master.index[customCode];
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function cloudIndexSet(customCode, binId) {
+  try {
+    let master = await cloudBinGet(MASTER_INDEX_BIN);
+    if (!master || !master.index) master = { index: {} };
+    master.index[customCode] = binId;
+    await cloudBinPut(MASTER_INDEX_BIN, master);
+  } catch (e) {}
+}
+
+// -------------------------------------------------------------
+// Unified Get Vault Helper (Memory -> KV -> Cloud Bin -> Master Index)
+// -------------------------------------------------------------
 async function getVaultRecord(code) {
   code = (code || '').trim().toUpperCase();
   if (!code) return null;
 
-  // 1. Try Vercel KV first if connected
-  const remote = await kvGet(code);
-  if (remote) return remote;
-
-  // 2. Try Local / /tmp disk
+  // 1. Try In-Memory & local /tmp disk first (super fast)
   loadVaults();
-  return vaults[code] || null;
+  if (vaults[code]) {
+    return vaults[code];
+  }
+
+  // 2. Try Vercel KV if connected
+  const remoteKV = await kvGet(code);
+  if (remoteKV) {
+    vaults[code] = remoteKV;
+    return remoteKV;
+  }
+
+  // 3. Try Direct Cloud Bin if code has a binId
+  const directBinId = extractBinId(code);
+  if (directBinId) {
+    const cloudRecord = await cloudBinGet(directBinId);
+    if (cloudRecord && cloudRecord.code) {
+      vaults[code] = cloudRecord;
+      saveVaults();
+      return cloudRecord;
+    }
+  }
+
+  // 4. Try Master Registry Bin for custom code lookup
+  const registeredBinId = await cloudIndexGet(code);
+  if (registeredBinId) {
+    const cloudRecord = await cloudBinGet(registeredBinId);
+    if (cloudRecord && cloudRecord.code) {
+      vaults[code] = cloudRecord;
+      saveVaults();
+      return cloudRecord;
+    }
+  }
+
+  return null;
 }
 
-// Unified Save Vault Helper
+// -------------------------------------------------------------
+// Unified Save Vault Helper (Memory + File + KV + Cloud Bin)
+// -------------------------------------------------------------
 async function saveVaultRecord(code, record, ttlSeconds = null) {
   code = (code || '').trim().toUpperCase();
+  record.code = code;
+  record.updatedAt = record.updatedAt || Date.now();
+
   vaults[code] = record;
   saveVaults();
+
+  // Save to KV if configured
   await kvSet(code, record, ttlSeconds);
+
+  // Determine Cloud Bin ID
+  let binId = record.cloudBinId || extractBinId(code);
+  if (binId) {
+    record.cloudBinId = binId;
+    await cloudBinPut(binId, record);
+  } else {
+    // Custom code without bin ID: create cloud bin and register
+    const newBinId = await cloudBinCreate(record);
+    if (newBinId) {
+      record.cloudBinId = newBinId;
+      await cloudIndexSet(code, newBinId);
+      vaults[code] = record;
+      saveVaults();
+    }
+  }
 }
 
+// -------------------------------------------------------------
 // Unified Delete Vault Helper
+// -------------------------------------------------------------
 async function deleteVaultRecord(code) {
   code = (code || '').trim().toUpperCase();
+  const existing = vaults[code];
+  const binId = (existing && existing.cloudBinId) || extractBinId(code);
+
   delete vaults[code];
   saveVaults();
   await kvDel(code);
+
+  if (binId) {
+    await cloudBinDelete(binId);
+  }
 }
 
 // Initial load
@@ -131,11 +308,13 @@ function hashPin(pin, salt) {
   return crypto.pbkdf2Sync(pin, salt, 10000, 32, 'sha256').toString('hex');
 }
 
-function generateRandomCode() {
+function generateRandomSlug() {
+  return crypto.randomBytes(3).toString('hex'); // 6-char hex e.g. 'cbfbda'
+}
+
+function generateRandomPrefix() {
   const prefixes = ['VAULT', 'CIPHER', 'LOCK', 'SHIELD', 'DROP', 'NEXUS', 'GHOST'];
-  const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-  const num = Math.floor(1000 + Math.random() * 9000);
-  return `${prefix}-${num}`;
+  return prefixes[Math.floor(Math.random() * prefixes.length)];
 }
 
 // Middleware
@@ -151,6 +330,7 @@ app.get('/api/stats', async (req, res) => {
     status: 'online',
     platform: isVercel ? 'vercel-serverless' : 'nodejs-local',
     kvEnabled: Boolean(kvUrl && kvToken),
+    cloudSyncEnabled: true,
     activeVaults: activeCount,
     uptime: Math.floor(process.uptime()),
     timestamp: Date.now()
@@ -159,15 +339,16 @@ app.get('/api/stats', async (req, res) => {
 
 // 2. Generate Suggested Code
 app.get('/api/generate-code', async (req, res) => {
-  let code = generateRandomCode();
-  let existing = await getVaultRecord(code);
-  let attempts = 0;
-  while (existing && attempts < 10) {
-    code = generateRandomCode();
-    existing = await getVaultRecord(code);
-    attempts++;
+  try {
+    const prefix = generateRandomPrefix();
+    // Pre-create persistent cloud bin so code is globally synchronized immediately
+    const binId = await cloudBinCreate({ placeholder: true, createdAt: Date.now() });
+    const code = binId ? `${prefix}-${binId}` : `${prefix}-${generateRandomSlug()}`;
+    res.json({ code });
+  } catch (e) {
+    const fallback = `${generateRandomPrefix()}-${generateRandomSlug()}`;
+    res.json({ code: fallback });
   }
-  res.json({ code });
 });
 
 // 3. Create a new Vault
@@ -204,7 +385,9 @@ app.post('/api/vaults', async (req, res) => {
         }
       }
     } else {
-      code = generateRandomCode();
+      const prefix = generateRandomPrefix();
+      const binId = await cloudBinCreate({ placeholder: true, createdAt: Date.now() });
+      code = binId ? `${prefix}-${binId}` : `${prefix}-${generateRandomSlug()}`;
     }
 
     let pinHash = null;
@@ -222,6 +405,7 @@ app.post('/api/vaults', async (req, res) => {
       ttlSeconds = expMins * 60;
     }
 
+    const now = Date.now();
     const newVault = {
       code,
       title: (title && typeof title === 'string') ? title.trim().slice(0, 100) : 'Untitled Vault',
@@ -232,7 +416,8 @@ app.post('/api/vaults', async (req, res) => {
       hasPin: Boolean(pinHash),
       pinHash,
       pinSalt,
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
       expiresAt,
       burnAfterRead: Boolean(burnAfterRead),
       allowEdits: Boolean(allowEdits),
@@ -250,7 +435,8 @@ app.post('/api/vaults', async (req, res) => {
       expiresAt,
       burnAfterRead: newVault.burnAfterRead,
       allowEdits: newVault.allowEdits,
-      createdAt: newVault.createdAt
+      createdAt: newVault.createdAt,
+      updatedAt: newVault.updatedAt
     });
   } catch (err) {
     console.error('Error creating vault:', err);
@@ -284,18 +470,19 @@ app.get('/api/vaults/:code/meta', async (req, res) => {
     burnAfterRead: vault.burnAfterRead,
     allowEdits: vault.allowEdits,
     viewsCount: vault.viewsCount,
-    createdAt: vault.createdAt
+    createdAt: vault.createdAt,
+    updatedAt: vault.updatedAt || vault.createdAt
   });
 });
 
-// 5. Unlock & Retrieve Vault Content
+// 5. Unlock Vault (Reveal content & check PIN)
 app.post('/api/vaults/:code/unlock', async (req, res) => {
   try {
     const code = (req.params.code || '').trim().toUpperCase();
     const vault = await getVaultRecord(code);
 
     if (!vault) {
-      return res.status(404).json({ error: 'Vault not found, already burned, or expired.' });
+      return res.status(404).json({ error: 'Vault not found or may have expired.' });
     }
 
     if (vault.expiresAt && vault.expiresAt <= Date.now()) {
@@ -329,6 +516,7 @@ app.post('/api/vaults/:code/unlock', async (req, res) => {
       viewsCount: vault.viewsCount,
       expiresAt: vault.expiresAt,
       createdAt: vault.createdAt,
+      updatedAt: vault.updatedAt || vault.createdAt,
       burned: isBurned
     };
 
@@ -352,7 +540,57 @@ app.post('/api/vaults/:code/unlock', async (req, res) => {
   }
 });
 
-// 6. Update Vault (collaborative)
+// 6. Real-Time Collaborative Live Sync Endpoint
+// Lightweight polling for collaborative updates across devices (never burns, never increments views)
+app.get('/api/vaults/:code/sync', async (req, res) => {
+  try {
+    const code = (req.params.code || '').trim().toUpperCase();
+    const since = parseInt(req.query.since || '0', 10);
+    const vault = await getVaultRecord(code);
+
+    if (!vault) {
+      return res.status(404).json({ error: 'Vault not found.' });
+    }
+
+    if (vault.expiresAt && vault.expiresAt <= Date.now()) {
+      await deleteVaultRecord(code);
+      return res.status(404).json({ error: 'Vault has expired.' });
+    }
+
+    if (vault.hasPin) {
+      const pin = req.query.pin;
+      if (!pin || typeof pin !== 'string') {
+        return res.status(401).json({ error: 'PIN required for sync.', requiresPin: true });
+      }
+      const testHash = hashPin(pin.trim(), vault.pinSalt);
+      if (testHash !== vault.pinHash) {
+        return res.status(403).json({ error: 'Incorrect PIN.' });
+      }
+    }
+
+    const currentUpdatedAt = vault.updatedAt || vault.createdAt || 0;
+    if (since && currentUpdatedAt <= since) {
+      return res.json({ modified: false, updatedAt: currentUpdatedAt });
+    }
+
+    return res.json({
+      modified: true,
+      code: vault.code,
+      title: vault.title,
+      content: vault.content,
+      isEncrypted: vault.isEncrypted,
+      iv: vault.iv,
+      salt: vault.salt,
+      allowEdits: vault.allowEdits,
+      updatedAt: currentUpdatedAt
+    });
+  } catch (err) {
+    console.error('Sync error:', err);
+    res.status(500).json({ error: 'Live sync failed.' });
+  }
+});
+
+// 7. Update Vault (collaborative save)
 app.put('/api/vaults/:code', async (req, res) => {
   try {
     const code = (req.params.code || '').trim().toUpperCase();
@@ -397,7 +635,7 @@ app.put('/api/vaults/:code', async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Vault updated successfully.',
+      message: 'Vault updated successfully in cloud.',
       updatedAt: vault.updatedAt
     });
   } catch (err) {
@@ -406,7 +644,7 @@ app.put('/api/vaults/:code', async (req, res) => {
   }
 });
 
-// 7. Delete Vault
+// 8. Delete Vault
 app.delete('/api/vaults/:code', async (req, res) => {
   const code = (req.params.code || '').trim().toUpperCase();
   const vault = await getVaultRecord(code);
@@ -430,7 +668,7 @@ app.delete('/api/vaults/:code', async (req, res) => {
   res.json({ success: true, message: `Vault ${code} deleted.` });
 });
 
-// 8. Generate QR Code
+// 9. Generate QR Code
 app.get('/api/vaults/:code/qr', async (req, res) => {
   try {
     const code = (req.params.code || '').trim().toUpperCase();
