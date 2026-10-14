@@ -393,9 +393,23 @@ app.get('/api/vaults/:code/qr', async (req, res) => {
   }
 });
 
+// Catch-all for any unhandled /api routes - ALWAYS return JSON
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
+});
+
 // Serve frontend for all non-API routes
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error:', err);
+  if (req.path && req.path.startsWith('/api/')) {
+    return res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+  res.status(500).sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, '0.0.0.0', () => {

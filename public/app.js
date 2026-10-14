@@ -1,6 +1,6 @@
 /**
  * Vault — Minimalist Split-Screen Client Controller
- * Clean, fast, distraction-free text sharing with zero-knowledge AES-256 Web Crypto.
+ * Robust client with safe API handling, Web Crypto AES-256, and instant unlocks.
  */
 
 // ==========================================
@@ -93,7 +93,42 @@ class SoundFX {
 const sound = new SoundFX();
 
 // ==========================================
-// 2. Web Crypto (PBKDF2 + AES-GCM 256)
+// 2. Safe API Fetch Helper (Prevents Unexpected token 'T' JSON errors)
+// ==========================================
+async function apiCall(endpoint, options = {}) {
+  try {
+    const res = await fetch(endpoint, options);
+    const contentType = res.headers.get('content-type') || '';
+    let data = null;
+
+    if (contentType.includes('application/json')) {
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error('Server returned malformed JSON.');
+      }
+    } else {
+      const rawText = await res.text();
+      const cleanSnippet = rawText.replace(/<[^>]*>/g, '').trim().slice(0, 80);
+      throw new Error(cleanSnippet || `Server error (${res.status})`);
+    }
+
+    if (!res.ok) {
+      const errorMsg = (data && data.error) ? data.error : `Request failed (${res.status})`;
+      const err = new Error(errorMsg);
+      err.data = data;
+      err.status = res.status;
+      throw err;
+    }
+
+    return data;
+  } catch (err) {
+    throw err;
+  }
+}
+
+// ==========================================
+// 3. Web Crypto (PBKDF2 + AES-GCM 256)
 // ==========================================
 const CryptoVault = {
   bufferToBase64(buffer) {
@@ -175,7 +210,7 @@ const CryptoVault = {
 };
 
 // ==========================================
-// 3. Clean Markdown Renderer
+// 4. Clean Markdown Renderer
 // ==========================================
 function renderMarkdown(md) {
   if (!md) return '';
@@ -185,23 +220,16 @@ function renderMarkdown(md) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  // Code blocks
   text = text.replace(/```([\s\S]*?)```/g, (match, code) => `<pre><code>${code.trim()}</code></pre>`);
-  // Inline code
   text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Headers
   text = text.replace(/^### (.*$)/gim, '<h3>$1</h3>');
   text = text.replace(/^## (.*$)/gim, '<h2>$1</h2>');
   text = text.replace(/^# (.*$)/gim, '<h1>$1</h1>');
-  // Blockquotes
   text = text.replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>');
-  // Bold & Italic
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Unordered list
   text = text.replace(/^\s*[-*]\s+(.*$)/gim, '<ul><li>$1</li></ul>');
   text = text.replace(/<\/ul>\s*<ul>/g, '');
-  // Links
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 
   const paragraphs = text.split(/\n{2,}/);
@@ -216,7 +244,7 @@ function renderMarkdown(md) {
 }
 
 // ==========================================
-// 4. LocalStorage History
+// 5. LocalStorage History
 // ==========================================
 const VaultHistory = {
   KEY: 'vault_minimal_history_v1',
@@ -253,10 +281,9 @@ const VaultHistory = {
 };
 
 // ==========================================
-// 5. DOM Elements
+// 6. DOM Elements Cache
 // ==========================================
 const el = {
-  // Brand & Header
   headerBrand: document.getElementById('header-brand'),
   headerQuickUnlockForm: document.getElementById('header-quick-unlock-form'),
   headerCodeInput: document.getElementById('header-code-input'),
@@ -265,11 +292,9 @@ const el = {
   soundOnSvg: document.getElementById('sound-on-svg'),
   soundOffSvg: document.getElementById('sound-off-svg'),
 
-  // Workspace Split
   workspaceSplit: document.getElementById('workspace-split'),
   viewerContainer: document.getElementById('viewer-container'),
 
-  // Editor Pane
   vaultTitle: document.getElementById('vault-title'),
   vaultContent: document.getElementById('vault-content'),
   btnTogglePreview: document.getElementById('btn-toggle-preview'),
@@ -279,7 +304,6 @@ const el = {
   statChars: document.getElementById('stat-chars'),
   statWords: document.getElementById('stat-words'),
 
-  // Controls Sidebar
   createForm: document.getElementById('create-vault-form'),
   vaultCustomCode: document.getElementById('vault-custom-code'),
   btnRegenCode: document.getElementById('btn-regen-code'),
@@ -292,12 +316,10 @@ const el = {
   toggleAllowEdits: document.getElementById('toggle-allow-edits'),
   btnCreateVault: document.getElementById('btn-create-vault'),
 
-  // History Mini
   historyMiniList: document.getElementById('history-mini-list'),
   historyEmptyState: document.getElementById('history-empty-state'),
   btnClearHistory: document.getElementById('btn-clear-history'),
 
-  // Viewer
   btnViewerBack: document.getElementById('btn-viewer-back'),
   viewerCodeText: document.getElementById('viewer-code-text'),
   viewerTitleText: document.getElementById('viewer-title-text'),
@@ -320,7 +342,6 @@ const el = {
   btnSaveEdit: document.getElementById('btn-save-edit'),
   btnCancelEdit: document.getElementById('btn-cancel-edit'),
 
-  // Dialogs
   successDialog: document.getElementById('success-dialog'),
   modalCodeDisplay: document.getElementById('modal-code-display'),
   btnModalCopyCode: document.getElementById('btn-modal-copy-code'),
@@ -347,14 +368,14 @@ const el = {
   toastContainer: document.getElementById('toast-container')
 };
 
-// State
+// Global state
 let currentVault = null;
 let countdownTimer = null;
 let isPreviewing = false;
 let pendingPinCode = null;
 
 // ==========================================
-// 6. Notifications
+// 7. Toast Notifications
 // ==========================================
 function toast(message, type = 'info') {
   const t = document.createElement('div');
@@ -366,11 +387,11 @@ function toast(message, type = 'info') {
     t.style.transform = 'translateY(4px)';
     t.style.transition = 'all 0.2s ease';
     setTimeout(() => t.remove(), 200);
-  }, 3000);
+  }, 3500);
 }
 
 // ==========================================
-// 7. Navigation Views
+// 8. Navigation
 // ==========================================
 function showWorkspace() {
   sound.playClick();
@@ -388,7 +409,6 @@ function showViewer() {
 el.headerBrand.addEventListener('click', showWorkspace);
 el.btnViewerBack.addEventListener('click', showWorkspace);
 
-// Audio Toggle
 el.btnToggleSound.addEventListener('click', () => {
   sound.enabled = !sound.enabled;
   el.soundOnSvg.classList.toggle('hidden', !sound.enabled);
@@ -397,7 +417,7 @@ el.btnToggleSound.addEventListener('click', () => {
 });
 
 // ==========================================
-// 8. Editor Stats & Preview
+// 9. Editor Stats & Preview
 // ==========================================
 function updateStats() {
   const val = el.vaultContent.value;
@@ -435,16 +455,15 @@ el.btnClearText.addEventListener('click', () => {
   }
 });
 
-// Templates
 const TEMPLATES = {
   secret: `# Confidential Note
 - **Date:** ${new Date().toLocaleDateString()}
 - **Token:** \`sec_live_${Math.random().toString(36).substring(2, 12)}\`
-- **Notes:** Keep this code confidential.`,
+- **Notice:** This note is protected. Do not share code publicly.`,
 
   code: `// Secure API Connector
 async function queryVault(code) {
-  const res = await fetch(\`/api/vaults/\${code}/meta\`);
+  const res = await fetch(\`/api/vaults/\${encodeURIComponent(code)}/meta\`);
   return res.json();
 }`,
 
@@ -469,12 +488,10 @@ document.querySelectorAll('.btn-chip').forEach(btn => {
   });
 });
 
-// Code Generation
 async function generateFreshCode() {
   try {
-    const res = await fetch('/api/generate-code');
-    const data = await res.json();
-    if (data.code) el.vaultCustomCode.value = data.code;
+    const data = await apiCall('/api/generate-code');
+    if (data && data.code) el.vaultCustomCode.value = data.code;
   } catch {
     el.vaultCustomCode.value = 'VAULT-' + Math.floor(1000 + Math.random() * 9000);
   }
@@ -485,7 +502,6 @@ el.btnRegenCode.addEventListener('click', () => {
   generateFreshCode();
 });
 
-// PIN Drawer Toggle
 el.toggleEnablePin.addEventListener('change', (e) => {
   sound.playClick();
   el.pinDrawer.classList.toggle('hidden', !e.target.checked);
@@ -494,7 +510,7 @@ el.toggleEnablePin.addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 9. Create Vault Submission
+// 10. Submit Vault (Creation)
 // ==========================================
 async function submitVault() {
   const content = el.vaultContent.value.trim();
@@ -539,7 +555,7 @@ async function submitVault() {
       isEncrypted = true;
     }
 
-    const res = await fetch('/api/vaults', {
+    const data = await apiCall('/api/vaults', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -556,30 +572,24 @@ async function submitVault() {
       })
     });
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to create vault.');
-
     sound.playSuccess();
     toast('Vault created successfully!', 'success');
 
     VaultHistory.add({ code: data.code, title: data.title });
 
-    // Open Success Dialog
     el.modalCodeDisplay.textContent = data.code;
     const shareUrl = `${window.location.origin}/#code=${data.code}`;
     el.modalShareLink.value = shareUrl;
 
     try {
-      const qrRes = await fetch(`/api/vaults/${data.code}/qr`);
-      const qrData = await qrRes.json();
-      if (qrData.qr) el.modalQrImg.src = qrData.qr;
+      const qrData = await apiCall(`/api/vaults/${encodeURIComponent(data.code)}/qr`);
+      if (qrData && qrData.qr) el.modalQrImg.src = qrData.qr;
     } catch (e) {
       console.warn('QR error:', e);
     }
 
     el.successDialog.showModal();
 
-    // Prepare fresh form
     generateFreshCode();
     el.vaultContent.value = '';
     el.vaultTitle.value = '';
@@ -605,7 +615,6 @@ el.createForm.addEventListener('submit', (e) => {
   submitVault();
 });
 
-// Shortcut Ctrl+Enter or Cmd+Enter to submit
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     if (!el.workspaceSplit.classList.contains('hidden')) {
@@ -614,7 +623,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Modal Actions
 el.btnModalCopyCode.addEventListener('click', () => {
   sound.playClick();
   const code = el.modalCodeDisplay.textContent;
@@ -644,7 +652,7 @@ el.btnModalClose.addEventListener('click', () => {
 });
 
 // ==========================================
-// 10. Unlock Vault Logic
+// 11. Unlock Vault
 // ==========================================
 el.headerQuickUnlockForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -659,16 +667,16 @@ el.headerQuickUnlockForm.addEventListener('submit', (e) => {
 });
 
 async function unlockCode(code, providedPin = null) {
+  if (!code || typeof code !== 'string' || !code.trim()) {
+    toast('Please enter a valid vault code.', 'error');
+    return;
+  }
+  code = code.trim().toUpperCase();
+
   try {
     // 1. Check meta first
-    const metaRes = await fetch(`/api/vaults/${encodeURIComponent(code)}/meta`);
-    const metaData = await metaRes.json();
+    const metaData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/meta`);
 
-    if (!metaRes.ok) {
-      throw new Error(metaData.error || 'Vault not found or expired.');
-    }
-
-    // If PIN is required and not yet provided, show clean PIN modal
     if (metaData.hasPin && !providedPin) {
       pendingPinCode = code;
       el.pinPromptDesc.textContent = `Vault ${code} is PIN protected. Enter PIN below:`;
@@ -679,33 +687,33 @@ async function unlockCode(code, providedPin = null) {
     }
 
     // 2. Perform Unlock Request
-    const unlockRes = await fetch(`/api/vaults/${encodeURIComponent(code)}/unlock`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin: providedPin || undefined })
-    });
-
-    const unlockData = await unlockRes.json();
-
-    if (!unlockRes.ok) {
-      if (unlockData.requiresPin) {
+    let unlockData;
+    try {
+      unlockData = await apiCall(`/api/vaults/${encodeURIComponent(code)}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: providedPin || undefined })
+      });
+    } catch (unlockErr) {
+      if (unlockErr.data && unlockErr.data.requiresPin) {
         pendingPinCode = code;
         el.pinPromptDialog.showModal();
         el.modalPinInput.focus();
+        return;
       }
-      throw new Error(unlockData.error || 'Access denied.');
+      throw unlockErr;
     }
 
     const vault = unlockData.vault;
     let decryptedText = vault.content;
 
-    // 3. Client Decryption
+    // 3. Client Decryption if E2EE was used
     if (vault.isEncrypted) {
       try {
         const secret = code + (providedPin ? `:${providedPin}` : '');
         decryptedText = await CryptoVault.decrypt(vault.content, secret, vault.iv, vault.salt);
       } catch {
-        throw new Error('Decryption failed. Invalid code or PIN.');
+        throw new Error('Decryption failed. The code or PIN may be incorrect.');
       }
     }
 
@@ -728,7 +736,6 @@ async function unlockCode(code, providedPin = null) {
   }
 }
 
-// PIN Modal submission
 el.pinPromptForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const pin = el.modalPinInput.value.trim();
@@ -744,13 +751,11 @@ el.btnModalCancelPin.addEventListener('click', () => {
   pendingPinCode = null;
 });
 
-// Render Unlocked Document
 function renderViewer(vault) {
   el.viewerCodeText.textContent = vault.code;
   el.viewerTitleText.textContent = vault.title || 'Untitled Note';
   el.viewerViewsText.textContent = `${vault.viewsCount} ${vault.viewsCount === 1 ? 'view' : 'views'}`;
 
-  // Burn Alert
   if (vault.burned) {
     el.viewerBurnBadge.classList.remove('hidden');
     el.viewerBurnAlert.classList.remove('hidden');
@@ -759,7 +764,6 @@ function renderViewer(vault) {
     el.viewerBurnAlert.classList.add('hidden');
   }
 
-  // Raw & Rendered
   el.unlockedTextRaw.textContent = vault.decryptedText;
   el.unlockedTextRendered.innerHTML = renderMarkdown(vault.decryptedText);
 
@@ -769,11 +773,9 @@ function renderViewer(vault) {
   el.btnViewRaw.classList.add('active');
   el.btnViewMarkdown.classList.remove('active');
 
-  // Edit / Destroy Buttons
   el.btnEditUnlocked.classList.toggle('hidden', !vault.allowEdits || Boolean(vault.burned));
   el.btnDestroyNow.classList.toggle('hidden', Boolean(vault.burned));
 
-  // Countdown Timer
   if (countdownTimer) clearInterval(countdownTimer);
   if (!vault.expiresAt) {
     el.viewerExpiryText.textContent = 'Never Expires';
@@ -828,9 +830,8 @@ el.btnShowQR.addEventListener('click', async () => {
   if (!currentVault) return;
   sound.playClick();
   try {
-    const res = await fetch(`/api/vaults/${currentVault.code}/qr`);
-    const data = await res.json();
-    if (data.qr) {
+    const data = await apiCall(`/api/vaults/${encodeURIComponent(currentVault.code)}/qr`);
+    if (data && data.qr) {
       el.qrLargeImg.src = data.qr;
       el.qrCodePillText.textContent = currentVault.code;
       el.qrDialogSubtitle.textContent = `Direct access code: ${currentVault.code}`;
@@ -861,7 +862,6 @@ el.btnViewMarkdown.addEventListener('click', () => {
   el.unlockedEditContainer.classList.add('hidden');
 });
 
-// Collaborative Edit
 el.btnEditUnlocked.addEventListener('click', () => {
   sound.playClick();
   const isEditing = !el.unlockedEditContainer.classList.contains('hidden');
@@ -914,7 +914,7 @@ el.btnSaveEdit.addEventListener('click', async () => {
       salt = encrypted.salt;
     }
 
-    const res = await fetch(`/api/vaults/${currentVault.code}`, {
+    await apiCall(`/api/vaults/${encodeURIComponent(currentVault.code)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -925,9 +925,6 @@ el.btnSaveEdit.addEventListener('click', async () => {
         salt
       })
     });
-
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to update vault.');
 
     currentVault.decryptedText = newContent;
     el.unlockedTextRaw.textContent = newContent;
@@ -949,19 +946,16 @@ el.btnSaveEdit.addEventListener('click', async () => {
   }
 });
 
-// Destroy Vault
 el.btnDestroyNow.addEventListener('click', async () => {
   if (!currentVault) return;
   if (!confirm(`Permanently delete vault ${currentVault.code}?`)) return;
 
   try {
-    const res = await fetch(`/api/vaults/${currentVault.code}`, {
+    await apiCall(`/api/vaults/${encodeURIComponent(currentVault.code)}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pin: currentVault.pin })
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to delete vault.');
 
     sound.playSuccess();
     toast(`Vault ${currentVault.code} deleted`, 'info');
@@ -976,7 +970,7 @@ el.btnDestroyNow.addEventListener('click', async () => {
 });
 
 // ==========================================
-// 11. History Mini List
+// 12. History Mini List
 // ==========================================
 function renderHistory() {
   const list = VaultHistory.getAll();
@@ -1013,7 +1007,6 @@ el.btnClearHistory.addEventListener('click', () => {
   }
 });
 
-// Dialog Outside Click to close
 [el.successDialog, el.pinPromptDialog, el.qrDialog].forEach(dialog => {
   dialog.addEventListener('click', (e) => {
     const rect = dialog.getBoundingClientRect();
@@ -1024,7 +1017,7 @@ el.btnClearHistory.addEventListener('click', () => {
 });
 
 // ==========================================
-// 12. Deep Linking & Stats
+// 13. Deep Linking & Stats
 // ==========================================
 function checkDeepLink() {
   const hash = window.location.hash;
@@ -1048,9 +1041,8 @@ function checkDeepLink() {
 
 async function fetchStats() {
   try {
-    const res = await fetch('/api/stats');
-    const data = await res.json();
-    if (data.activeVaults !== undefined) {
+    const data = await apiCall('/api/stats');
+    if (data && data.activeVaults !== undefined) {
       el.activeVaultsBadge.textContent = `${data.activeVaults} active ${data.activeVaults === 1 ? 'vault' : 'vaults'}`;
     }
   } catch {
