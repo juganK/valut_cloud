@@ -1,0 +1,18 @@
+{
+  "DEMO-2026": {
+    "code": "DEMO-2026",
+    "title": "Test Cloud Text",
+    "content": "Welcome to CipherVault! Cloud protected text sharing.",
+    "isEncrypted": false,
+    "iv": null,
+    "salt": null,
+    "hasPin": false,
+    "pinHash": null,
+    "pinSalt": null,
+    "createdAt": 1792005295400,
+    "expiresAt": 1792008895400,
+    "burnAfterRead": false,
+    "allowEdits": false,
+    "viewsCount": 1
+  }
+}

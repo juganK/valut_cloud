@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vault — Minimalist Cloud Text Sharing</title>
+  <meta name="description" content="Minimalist, secure cloud text sharing with custom code protection, PIN encryption, and auto-destruct.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+</head>
+<body>
+
+  <!-- Top Minimalist Header -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand-group" id="header-brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <span class="brand-title">Vault</span>
+          <span class="brand-sub">Cloud Text Sharing</span>
+        </div>
+      </div>
+
+      <!-- Quick Unlock Bar in Header -->
+      <div class="header-unlock-bar">
+        <form id="header-quick-unlock-form" class="quick-unlock-form" onsubmit="return false;">
+          <div class="quick-input-wrap">
+            <svg class="quick-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="header-code-input" class="quick-code-input" placeholder="Enter code (e.g. VAULT-1234)..." spellcheck="false" autocomplete="off">
+            <button type="submit" class="quick-unlock-btn" title="Unlock Vault">Unlock</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="header-meta">
+        <div class="status-indicator" id="server-status-pill">
+          <span class="status-dot"></span>
+          <span id="active-vaults-badge">Cloud Online</span>
+        </div>
+        <button id="btn-toggle-sound" class="btn-ghost-icon" title="Toggle audio feedback" aria-label="Audio Feedback">
+          <svg id="sound-on-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          </svg>
+          <svg id="sound-off-svg" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <line x1="23" y1="9" x2="17" y2="15"></line>
+            <line x1="17" y1="9" x2="23" y2="15"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Viewport Container -->
+  <main class="app-viewport">
+    
+    <!-- SPLIT-SCREEN WORKSPACE (Create & Settings) -->
+    <div class="workspace-split" id="workspace-split">
+      
+      <!-- LEFT PANE: Distraction-free Text Editor -->
+      <section class="editor-pane" aria-label="Text Editor">
+        <div class="editor-card">
+          
+          <!-- Document Header -->
+          <div class="doc-header">
+            <input type="text" id="vault-title" class="title-input" placeholder="Untitled Note" maxlength="90" autocomplete="off">
+            
+            <div class="doc-templates">
+              <span class="templates-hint">Templates:</span>
+              <button type="button" class="btn-chip" data-sample="secret">Secret Note</button>
+              <button type="button" class="btn-chip" data-sample="code">Code</button>
+              <button type="button" class="btn-chip" data-sample="creds">Credentials</button>
+            </div>
+          </div>
+
+          <!-- Editor Actions Bar -->
+          <div class="editor-bar">
+            <div class="bar-left">
+              <span class="mono-badge">MARKDOWN</span>
+              <button type="button" class="bar-btn" id="btn-toggle-preview">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+                <span id="preview-btn-label">Preview</span>
+              </button>
+              <button type="button" class="bar-btn" id="btn-clear-text">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
+                </svg>
+                <span>Clear</span>
+              </button>
+            </div>
+
+            <div class="bar-right">
+              <span class="char-counter"><span id="stat-chars">0</span> chars</span>
+              <span class="counter-dot">·</span>
+              <span class="word-counter"><span id="stat-words">0</span> words</span>
+            </div>
+          </div>
+
+          <!-- Textarea Workspace -->
+          <div class="textarea-wrapper">
+            <textarea id="vault-content" class="editor-textarea mono-font" placeholder="Write or paste your confidential text, private keys, meeting notes, code snippets, or passwords here..." spellcheck="false" required></textarea>
+            <div id="editor-preview-pane" class="editor-preview-box hidden"></div>
+          </div>
+
+          <!-- Mobile shortcut hint -->
+          <div class="editor-footer-hint">
+            <span>Press <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to save</span>
+            <span class="privacy-note">Zero-knowledge client encrypted</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT PANE: Code Configuration & Security Controls -->
+      <aside class="sidebar-pane" aria-label="Security and Sharing Settings">
+        <form id="create-vault-form" onsubmit="return false;">
+          
+          <!-- 1. Code Badge Box -->
+          <div class="panel-section">
+            <div class="section-top">
+              <label for="vault-custom-code" class="section-label">Secret Access Code</label>
+              <span class="section-tag">Required to unlock</span>
+            </div>
+
+            <div class="code-box-minimal">
+              <span class="code-box-prefix">#</span>
+              <input type="text" id="vault-custom-code" class="code-box-input mono-font" placeholder="VAULT-XXXX" spellcheck="false" autocomplete="off" maxlength="32">
+              <button type="button" id="btn-regen-code" class="btn-icon-square" title="Generate New Code">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"></path>
+                </svg>
+              </button>
+            </div>
+            <p class="section-desc">Recipients will need this code. You can use the generated code or type your own.</p>
+          </div>
+
+          <!-- 2. Security Options List -->
+          <div class="panel-section">
+            <span class="section-label mb-2">Protection & Lifecycle</span>
+
+            <div class="options-list">
+              
+              <!-- Option: Client-Side E2EE -->
+              <div class="option-row">
+                <div class="option-info">
+                  <div class="option-title">Zero-Knowledge AES-256</div>
+                  <div class="option-sub">Encrypt in browser before uploading</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="toggle-e2ee" checked>
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <!-- Option: Additional PIN -->
+              <div class="option-row">
+                <div class="option-info">
+                  <div class="option-title">Extra PIN Code</div>
+                  <div class="option-sub">Require 2nd password to unlock</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="toggle-enable-pin">
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <!-- Expandable PIN Field -->
+              <div class="pin-drawer hidden" id="pin-input-drawer">
+                <input type="password" id="vault-pin-input" class="input-minimal" placeholder="Set custom PIN/password..." autocomplete="new-password">
+              </div>
+
+              <!-- Option: Expiration -->
+              <div class="option-row select-row">
+                <div class="option-info">
+                  <div class="option-title">Expiration</div>
+                  <div class="option-sub">Auto-purge from cloud storage</div>
+                </div>
+                <div class="select-container">
+                  <select id="vault-expiration" class="select-minimal">
+                    <option value="10">10 Minutes</option>
+                    <option value="60" selected>1 Hour</option>
+                    <option value="1440">24 Hours</option>
+                    <option value="10080">7 Days</option>
+                    <option value="0">Never</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Option: Burn After Reading -->
+              <div class="option-row">
+                <div class="option-info">
+                  <div class="option-title">Burn After Reading</div>
+                  <div class="option-sub">Purge permanently after first view</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="toggle-burn">
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <!-- Option: Collaborative Edit -->
+              <div class="option-row">
+                <div class="option-info">
+                  <div class="option-title">Collaborative Editing</div>
+                  <div class="option-sub">Allow anyone with code to edit</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="toggle-allow-edits">
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Primary Submit Button -->
+          <div class="panel-section action-section">
+            <button type="submit" id="btn-create-vault" class="btn-primary-action">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              <span>Create Protected Vault</span>
+            </button>
+          </div>
+
+          <!-- Recent Vaults Quick List -->
+          <div class="panel-section history-mini-section">
+            <div class="section-top">
+              <span class="section-label">Recent on this Device</span>
+              <button type="button" class="btn-text-subtle" id="btn-clear-history">Clear</button>
+            </div>
+            <div id="history-mini-list" class="history-mini-list">
+              <div class="history-empty-text" id="history-empty-state">No recent vaults yet</div>
+            </div>
+          </div>
+
+        </form>
+      </aside>
+    </div>
+
+    <!-- UNLOCKED VIEWER (Displays when code is entered or unlocked) -->
+    <section class="viewer-container hidden" id="viewer-container" aria-label="Unlocked Vault Content">
+      <div class="viewer-card">
+        
+        <!-- Viewer Header -->
+        <div class="viewer-header">
+          <div class="viewer-brand-left">
+            <button type="button" class="btn-back" id="btn-viewer-back" title="Back to editor">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+              </svg>
+              <span>Back</span>
+            </button>
+            <div class="viewer-code-pill mono-font" id="viewer-code-text">VAULT-0000</div>
+            <h2 class="viewer-title" id="viewer-title-text">Untitled Note</h2>
+          </div>
+
+          <div class="viewer-meta-right">
+            <span class="badge-tag badge-burn hidden" id="viewer-burn-badge">Burned from Cloud</span>
+            <span class="badge-tag badge-timer" id="viewer-expiry-text">Expires in: --</span>
+            <span class="badge-tag badge-views" id="viewer-views-text">1 view</span>
+          </div>
+        </div>
+
+        <!-- Burn Warning Banner -->
+        <div class="burn-banner hidden" id="viewer-burn-alert">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span><strong>One-Time Note:</strong> This note was burned upon viewing. It no longer exists on the cloud server. Make sure to copy or download it now.</span>
+        </div>
+
+        <!-- Viewer Toolbar -->
+        <div class="viewer-toolbar">
+          <div class="toolbar-left">
+            <button type="button" id="btn-copy-unlocked" class="btn-action-primary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span id="copy-btn-label">Copy Text</span>
+            </button>
+            <button type="button" id="btn-download-unlocked" class="btn-action-secondary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Download</span>
+            </button>
+            <button type="button" id="btn-show-qr" class="btn-action-secondary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7"></rect>
+                <rect x="14" y="3" width="7" height="7"></rect>
+                <rect x="14" y="14" width="7" height="7"></rect>
+                <rect x="3" y="14" width="7" height="7"></rect>
+              </svg>
+              <span>Share QR</span>
+            </button>
+          </div>
+
+          <div class="toolbar-right">
+            <div class="view-switch">
+              <button type="button" class="switch-item active" id="btn-view-raw">Raw</button>
+              <button type="button" class="switch-item" id="btn-view-markdown">Rendered</button>
+            </div>
+            <button type="button" id="btn-edit-unlocked" class="btn-action-secondary hidden">Edit</button>
+            <button type="button" id="btn-destroy-now" class="btn-action-danger">Destroy</button>
+          </div>
+        </div>
+
+        <!-- Viewer Content Area -->
+        <div class="viewer-body">
+          <pre id="unlocked-text-raw" class="viewer-pre mono-font"></pre>
+          <div id="unlocked-text-rendered" class="viewer-rendered hidden"></div>
+          
+          <!-- Collaborative Edit Container -->
+          <div id="unlocked-edit-container" class="viewer-edit-box hidden">
+            <textarea id="edit-content-textarea" class="editor-textarea mono-font" rows="12"></textarea>
+            <div class="edit-btn-row">
+              <button type="button" id="btn-save-edit" class="btn-action-primary">Save Changes</button>
+              <button type="button" id="btn-cancel-edit" class="btn-action-secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- SUCCESS SHARE MODAL (Native Dialog) -->
+  <dialog id="success-dialog" class="minimal-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title">Vault Created & Protected</h3>
+        <p class="modal-desc">Anyone with this code can view this text.</p>
+      </div>
+
+      <div class="code-share-display">
+        <div class="code-share-label">ACCESS CODE</div>
+        <div class="code-share-val mono-font" id="modal-code-display">VAULT-0000</div>
+        <button type="button" class="btn-action-primary" id="btn-modal-copy-code">
+          <span id="modal-copy-code-label">Copy Code</span>
+        </button>
+      </div>
+
+      <div class="link-share-box">
+        <label class="form-sublabel">Direct Share Link</label>
+        <div class="link-input-row">
+          <input type="text" id="modal-share-link" class="input-minimal mono-font" readonly>
+          <button type="button" class="btn-action-secondary" id="btn-modal-copy-link">Copy</button>
+        </div>
+      </div>
+
+      <div class="qr-share-box">
+        <div class="qr-wrapper">
+          <img id="modal-qr-img" src="" alt="QR code" width="140" height="140">
+        </div>
+        <span class="qr-desc">Scan with mobile camera to open</span>
+      </div>
+
+      <div class="modal-actions-row">
+        <button type="button" class="btn-action-primary w-full" id="btn-modal-open-now">Open in Viewer</button>
+        <button type="button" class="btn-action-secondary w-full" id="btn-modal-close">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- PIN PROMPT MODAL (for PIN-protected notes) -->
+  <dialog id="pin-prompt-dialog" class="minimal-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 class="modal-title">Enter Vault PIN</h3>
+        <p class="modal-desc" id="pin-prompt-desc">This vault is protected by a PIN.</p>
+      </div>
+
+      <form id="pin-prompt-form" onsubmit="return false;">
+        <input type="password" id="modal-pin-input" class="input-minimal text-center mb-4" placeholder="Enter PIN / Passcode" autofocus autocomplete="current-password">
+        <div class="modal-actions-row">
+          <button type="submit" id="btn-modal-submit-pin" class="btn-action-primary w-full">Unlock Note</button>
+          <button type="button" id="btn-modal-cancel-pin" class="btn-action-secondary w-full">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- QR CODE MODAL -->
+  <dialog id="qr-dialog" class="minimal-modal">
+    <div class="modal-card text-center">
+      <div class="modal-head">
+        <h3 class="modal-title">Mobile Share QR</h3>
+        <p class="modal-desc" id="qr-dialog-subtitle">Scan to access this vault</p>
+      </div>
+      <div class="qr-large-wrapper">
+        <img id="qr-large-img" src="" alt="Vault QR Code" width="200" height="200">
+      </div>
+      <div class="modal-code-tag mono-font" id="qr-code-pill-text">VAULT-0000</div>
+      <div class="modal-actions-row mt-4">
+        <button type="button" class="btn-action-secondary w-full" id="btn-qr-dialog-close">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- TOAST NOTIFICATIONS -->
+  <div class="toast-shelf" id="toast-container" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
