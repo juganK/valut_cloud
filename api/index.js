@@ -18,10 +18,10 @@ try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 } catch (e) {
-  console.warn('Could not create data dir:', e.message);
+  console.warn('Data dir notice:', e.message);
 }
 
-// In-memory vaults store backed by file writes
+// In-memory cache + file-backed storage
 let vaults = {};
 
 function loadVaults() {
@@ -29,44 +29,102 @@ function loadVaults() {
     if (fs.existsSync(DB_FILE)) {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       vaults = JSON.parse(raw);
-    } else {
-      vaults = {};
     }
   } catch (err) {
-    console.warn('Initializing fresh in-memory vault store:', err.message);
-    vaults = {};
+    // If empty or corrupted, keep current in-memory cache
   }
+  return vaults;
 }
 
 function saveVaults() {
   try {
-    const tempFile = `${DB_FILE}.tmp.${Date.now()}`;
-    fs.writeFileSync(tempFile, JSON.stringify(vaults, null, 2), 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
+    fs.writeFileSync(DB_FILE, JSON.stringify(vaults), 'utf-8');
   } catch (err) {
-    // On serverless if disk is restricted, in-memory store remains active
-    console.warn('Vault persistence notice:', err.message);
+    console.warn('Persistence notice:', err.message);
   }
 }
 
-loadVaults();
+// Optional Vercel KV / Upstash Redis Support (For 100% persistent global serverless storage)
+const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// Clean up expired vaults
-function cleanupExpired() {
-  const now = Date.now();
-  let changed = false;
-  for (const code of Object.keys(vaults)) {
-    if (vaults[code].expiresAt && vaults[code].expiresAt <= now) {
-      delete vaults[code];
-      changed = true;
+async function kvGet(code) {
+  if (!kvUrl || !kvToken) return null;
+  try {
+    const res = await fetch(`${kvUrl}/get/vault:${encodeURIComponent(code)}`, {
+      headers: { Authorization: `Bearer ${kvToken}` }
+    });
+    const json = await res.json();
+    if (json.result) {
+      return typeof json.result === 'string' ? JSON.parse(json.result) : json.result;
     }
+  } catch (e) {
+    console.warn('KV Get notice:', e.message);
   }
-  if (changed) {
-    saveVaults();
+  return null;
+}
+
+async function kvSet(code, vaultData, ttlSeconds = null) {
+  if (!kvUrl || !kvToken) return false;
+  try {
+    let url = `${kvUrl}/set/vault:${encodeURIComponent(code)}/${encodeURIComponent(JSON.stringify(vaultData))}`;
+    if (ttlSeconds && ttlSeconds > 0) {
+      url += `?ex=${ttlSeconds}`;
+    }
+    await fetch(url, {
+      headers: { Authorization: `Bearer ${kvToken}` }
+    });
+    return true;
+  } catch (e) {
+    console.warn('KV Set notice:', e.message);
+    return false;
   }
 }
 
-setInterval(cleanupExpired, 30000);
+async function kvDel(code) {
+  if (!kvUrl || !kvToken) return false;
+  try {
+    await fetch(`${kvUrl}/del/vault:${encodeURIComponent(code)}`, {
+      headers: { Authorization: `Bearer ${kvToken}` }
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Unified Get Vault Helper (KV -> File -> Memory)
+async function getVaultRecord(code) {
+  code = (code || '').trim().toUpperCase();
+  if (!code) return null;
+
+  // 1. Try Vercel KV first if connected
+  const remote = await kvGet(code);
+  if (remote) return remote;
+
+  // 2. Try Local / /tmp disk
+  loadVaults();
+  return vaults[code] || null;
+}
+
+// Unified Save Vault Helper
+async function saveVaultRecord(code, record, ttlSeconds = null) {
+  code = (code || '').trim().toUpperCase();
+  vaults[code] = record;
+  saveVaults();
+  await kvSet(code, record, ttlSeconds);
+}
+
+// Unified Delete Vault Helper
+async function deleteVaultRecord(code) {
+  code = (code || '').trim().toUpperCase();
+  delete vaults[code];
+  saveVaults();
+  await kvDel(code);
+}
+
+// Initial load
+loadVaults();
 
 // Helper for hashing PINs
 function hashPin(pin, salt) {
@@ -86,12 +144,13 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // 1. Server Stats & Health
-app.get('/api/stats', (req, res) => {
-  cleanupExpired();
+app.get('/api/stats', async (req, res) => {
+  loadVaults();
   const activeCount = Object.keys(vaults).length;
   res.json({
     status: 'online',
     platform: isVercel ? 'vercel-serverless' : 'nodejs-local',
+    kvEnabled: Boolean(kvUrl && kvToken),
     activeVaults: activeCount,
     uptime: Math.floor(process.uptime()),
     timestamp: Date.now()
@@ -99,16 +158,20 @@ app.get('/api/stats', (req, res) => {
 });
 
 // 2. Generate Suggested Code
-app.get('/api/generate-code', (req, res) => {
+app.get('/api/generate-code', async (req, res) => {
   let code = generateRandomCode();
-  while (vaults[code]) {
+  let existing = await getVaultRecord(code);
+  let attempts = 0;
+  while (existing && attempts < 10) {
     code = generateRandomCode();
+    existing = await getVaultRecord(code);
+    attempts++;
   }
   res.json({ code });
 });
 
 // 3. Create a new Vault
-app.post('/api/vaults', (req, res) => {
+app.post('/api/vaults', async (req, res) => {
   try {
     let {
       code,
@@ -127,27 +190,23 @@ app.post('/api/vaults', (req, res) => {
       return res.status(400).json({ error: 'Text content cannot be empty.' });
     }
 
-    // Process or sanitize code
     if (code && typeof code === 'string') {
       code = code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
       if (code.length < 2 || code.length > 32) {
-        return res.status(400).json({ error: 'Code must be between 2 and 32 characters (letters, numbers, hyphen, underscore).' });
+        return res.status(400).json({ error: 'Code must be between 2 and 32 characters.' });
       }
-      if (vaults[code]) {
-        if (vaults[code].expiresAt && vaults[code].expiresAt <= Date.now()) {
-          delete vaults[code];
+      const existing = await getVaultRecord(code);
+      if (existing) {
+        if (existing.expiresAt && existing.expiresAt <= Date.now()) {
+          await deleteVaultRecord(code);
         } else {
-          return res.status(409).json({ error: `The code "${code}" is already in use. Please choose another code or randomize.` });
+          return res.status(409).json({ error: `The code "${code}" is already in use. Please pick another code.` });
         }
       }
     } else {
       code = generateRandomCode();
-      while (vaults[code]) {
-        code = generateRandomCode();
-      }
     }
 
-    // Process PIN protection
     let pinHash = null;
     let pinSalt = null;
     if (pin && typeof pin === 'string' && pin.trim().length > 0) {
@@ -155,11 +214,12 @@ app.post('/api/vaults', (req, res) => {
       pinHash = hashPin(pin.trim(), pinSalt);
     }
 
-    // Expiration calculation
     let expiresAt = null;
+    let ttlSeconds = null;
     const expMins = parseInt(expiresInMinutes, 10);
     if (!isNaN(expMins) && expMins > 0) {
       expiresAt = Date.now() + expMins * 60 * 1000;
+      ttlSeconds = expMins * 60;
     }
 
     const newVault = {
@@ -179,8 +239,7 @@ app.post('/api/vaults', (req, res) => {
       viewsCount: 0
     };
 
-    vaults[code] = newVault;
-    saveVaults();
+    await saveVaultRecord(code, newVault, ttlSeconds);
 
     return res.status(201).json({
       success: true,
@@ -200,17 +259,16 @@ app.post('/api/vaults', (req, res) => {
 });
 
 // 4. Get Vault Metadata (Check existence without revealing text or burning)
-app.get('/api/vaults/:code/meta', (req, res) => {
+app.get('/api/vaults/:code/meta', async (req, res) => {
   const code = (req.params.code || '').trim().toUpperCase();
-  const vault = vaults[code];
+  const vault = await getVaultRecord(code);
 
   if (!vault) {
     return res.status(404).json({ error: 'Vault not found or may have expired.' });
   }
 
   if (vault.expiresAt && vault.expiresAt <= Date.now()) {
-    delete vaults[code];
-    saveVaults();
+    await deleteVaultRecord(code);
     return res.status(404).json({ error: 'This vault has expired and is no longer available.' });
   }
 
@@ -231,18 +289,17 @@ app.get('/api/vaults/:code/meta', (req, res) => {
 });
 
 // 5. Unlock & Retrieve Vault Content
-app.post('/api/vaults/:code/unlock', (req, res) => {
+app.post('/api/vaults/:code/unlock', async (req, res) => {
   try {
     const code = (req.params.code || '').trim().toUpperCase();
-    const vault = vaults[code];
+    const vault = await getVaultRecord(code);
 
     if (!vault) {
       return res.status(404).json({ error: 'Vault not found, already burned, or expired.' });
     }
 
     if (vault.expiresAt && vault.expiresAt <= Date.now()) {
-      delete vaults[code];
-      saveVaults();
+      await deleteVaultRecord(code);
       return res.status(404).json({ error: 'This vault has expired.' });
     }
 
@@ -258,7 +315,7 @@ app.post('/api/vaults/:code/unlock', (req, res) => {
       }
     }
 
-    vault.viewsCount += 1;
+    vault.viewsCount = (vault.viewsCount || 0) + 1;
     const isBurned = vault.burnAfterRead;
 
     const payload = {
@@ -276,10 +333,14 @@ app.post('/api/vaults/:code/unlock', (req, res) => {
     };
 
     if (isBurned) {
-      delete vaults[code];
+      await deleteVaultRecord(code);
+    } else {
+      let ttlSeconds = null;
+      if (vault.expiresAt) {
+        ttlSeconds = Math.max(1, Math.floor((vault.expiresAt - Date.now()) / 1000));
+      }
+      await saveVaultRecord(code, vault, ttlSeconds);
     }
-
-    saveVaults();
 
     return res.json({
       success: true,
@@ -292,17 +353,17 @@ app.post('/api/vaults/:code/unlock', (req, res) => {
 });
 
 // 6. Update Vault (collaborative)
-app.put('/api/vaults/:code', (req, res) => {
+app.put('/api/vaults/:code', async (req, res) => {
   try {
     const code = (req.params.code || '').trim().toUpperCase();
-    const vault = vaults[code];
+    const vault = await getVaultRecord(code);
 
     if (!vault) {
       return res.status(404).json({ error: 'Vault not found.' });
     }
 
     if (!vault.allowEdits) {
-      return res.status(403).json({ error: 'This vault is read-only and does not allow edits.' });
+      return res.status(403).json({ error: 'This vault is read-only.' });
     }
 
     if (vault.hasPin) {
@@ -328,7 +389,11 @@ app.put('/api/vaults/:code', (req, res) => {
     if (salt !== undefined) vault.salt = salt;
     vault.updatedAt = Date.now();
 
-    saveVaults();
+    let ttlSeconds = null;
+    if (vault.expiresAt) {
+      ttlSeconds = Math.max(1, Math.floor((vault.expiresAt - Date.now()) / 1000));
+    }
+    await saveVaultRecord(code, vault, ttlSeconds);
 
     return res.json({
       success: true,
@@ -337,14 +402,14 @@ app.put('/api/vaults/:code', (req, res) => {
     });
   } catch (err) {
     console.error('Error updating vault:', err);
-    res.status(500).json({ error: 'Internal server error while updating vault.' });
+    res.status(500).json({ error: 'Internal server error.' });
   }
 });
 
 // 7. Delete Vault
-app.delete('/api/vaults/:code', (req, res) => {
+app.delete('/api/vaults/:code', async (req, res) => {
   const code = (req.params.code || '').trim().toUpperCase();
-  const vault = vaults[code];
+  const vault = await getVaultRecord(code);
 
   if (!vault) {
     return res.status(404).json({ error: 'Vault not found.' });
@@ -361,10 +426,8 @@ app.delete('/api/vaults/:code', (req, res) => {
     }
   }
 
-  delete vaults[code];
-  saveVaults();
-
-  res.json({ success: true, message: `Vault ${code} has been permanently destroyed.` });
+  await deleteVaultRecord(code);
+  res.json({ success: true, message: `Vault ${code} deleted.` });
 });
 
 // 8. Generate QR Code
@@ -411,5 +474,4 @@ app.use((err, req, res, next) => {
   res.status(500).sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-// Export Express app for Vercel Serverless Function handler
 module.exports = app;
